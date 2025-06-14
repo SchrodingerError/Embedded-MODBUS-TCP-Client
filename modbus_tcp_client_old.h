@@ -6,7 +6,6 @@
 #include <unistd.h>
 #include <arpa/inet.h>
 #include <sys/socket.h>
-#include <pthread.h>  // Use mutexes
 
 // Enum class for MODBUS function codes
 enum class ModbusFunction : uint8_t {
@@ -20,63 +19,68 @@ enum class ModbusFunction : uint8_t {
     WRITE_MULTIPLE_HOLDING_REGISTERS = 0x10
 };
 
-// Enum class for error codes
 enum class ModbusError {
-    NONE = 0,
-    TIMEOUT,
-    INVALID_RESPONSE,
-    CONNECTION_LOST,
-    EXCEPTION_RESPONSE,
-    INVALID_REQUEST
+    NONE = 0,                  // No error
+    TIMEOUT,                   // No response from server
+    INVALID_RESPONSE,          // Response does not match request
+    CONNECTION_LOST,           // Connection issue
+    EXCEPTION_RESPONSE,        // MODBUS Exception response (error code)
+    INVALID_REQUEST,           // User tries doing something they shouldn't
 };
+
 
 class ModbusTCPClient {
 public:
-    // Constructor that allocates dynamic buffers based on provided counts and start addresses.
+    ModbusTCPClient(const char* ip, int port); // Extra constructor that does CANNOT use readAll() or writeAll()
     ModbusTCPClient(const char* ip, int port, int numCoils, int numDI, int numIR, int numHR,
-                    int startCoils = 0, int startDI = 0, int startIR = 0, int startHR = 0);
-    // Simpler constructor for manual MODBUS function calls (without readAll/writeAll)
-    ModbusTCPClient(const char* ip, int port);
+        int startCoils = 0, int startDI = 0, int startIR = 0, int startHR = 0);
+
     ~ModbusTCPClient();
 
-    // Set start addresses for each type.
+    // Set the start address of each type. Either use this after creating the object or put them in the constructor
     void setStartAddresses(int startCoils, int startDI, int startIR, int startHR);
 
-    // Connection functions
     bool connectServer();
     void disconnectServer();
     bool isConnected() const;
+    
+    // Manually disconnectServer and return reconnectServer()
     bool reconnectServer();
 
-    // Set the timeout (in milliseconds) for receiving responses.
+    // Set the timeout for receiving responses
     void setTimeout(int milliseconds);
 
-    // Getters and setters for data values (if using the automatic mode).
+    // Setters (preferred to be used when calling writeAll())
     void setCoil(int address, bool value);
     void setHoldingRegister(int address, uint16_t value);
+
+    // Getters (preferred to be used when calling readAll())
     bool getCoil(int address) const;
-    bool getDesiredCoil(int address) const;
+    bool getDesiredCoil(int address) const;  // Retrieves the "to be written" value
     bool getDiscreteInput(int address) const;
     uint16_t getHoldingRegister(int address) const;
-    uint16_t getDesiredHoldingRegister(int address) const;
+    uint16_t getDesiredHoldingRegister(int address) const;  // Retrieves the "to be written" value
     uint16_t getInputRegister(int address) const;
 
-    // High-level functions: readAll and writeAll update the internal buffers.
-    ModbusError readAll();
-    ModbusError writeAll();
-
-    // Low-level MODBUS functions (manual calls)
+    ModbusError readAll(); // Reads every coil, DI, IR, and HR
+    ModbusError writeAll(); // Writes every coil and HR
+    
+    // Manual MODBUS TCP actions (not preferred to be called by user)
     ModbusError readCoil(int address, bool &coilState);
     ModbusError readMultipleCoils(int address, int count, bool coilStates[]);
+
     ModbusError readDiscreteInput(int address, bool &discreteInput);
     ModbusError readMultipleDiscreteInputs(int address, int count, bool discreteInputs[]);
+
     ModbusError readHoldingRegister(int address, uint16_t &holdingRegister);
     ModbusError readMultipleHoldingRegisters(int address, int count, uint16_t holdingRegisters[]);
+
     ModbusError readInputRegister(int address, uint16_t &inputRegister);
     ModbusError readMultipleInputRegisters(int address, int count, uint16_t inputRegisters[]);
 
     ModbusError writeCoil(int address, bool value);
     ModbusError writeMultipleCoils(int address, int count, const bool values[]);
+
     ModbusError writeHoldingRegister(int address, uint16_t value);
     ModbusError writeMultipleHoldingRegisters(int address, int count, const uint16_t values[]);
 
@@ -86,42 +90,26 @@ private:
     int serverPort;
     int socketFD;
     uint16_t transactionID;
-    int timeoutMilliseconds = 2000; // Default 2-second timeout
+    int timeoutMilliseconds = 2000; // Default 2 second timeout on receiving responses
 
-    // Start addresses for each data type
-    int startCoils, startDiscreteInputs, startInputRegisters, startHoldingRegisters;
-    // Number of items for each type
+    // Storing MODBUS register information
     int numCoils, numDiscreteInputs, numInputRegisters, numHoldingRegisters;
+    int startCoils, startDiscreteInputs, startInputRegisters, startHoldingRegisters; // The start address of each type of register
+        
+    bool* coilsRead;       // Stores the actual state of coils on the MODBUS server
+    bool* coilsWrite;      // Stores the desired state of coils to be written
+    bool* discreteInputs;  // Only read from the MODBUS server (no writes)
+        
+    uint16_t* inputRegisters;        // Only read from the MODBUS server
+    uint16_t* holdingRegistersRead;  // Stores actual values from the MODBUS server
+    uint16_t* holdingRegistersWrite; // Stores desired values to write
 
-    // Internal storage for automatic readAll()/writeAll() mode
-    bool* coilsRead;       // Actual state from PLC
-    bool* coilsWrite;      // Desired state to write
-    bool* discreteInputs;  // Only read
-    uint16_t* inputRegisters;        // Only read
-    uint16_t* holdingRegistersRead;  // Actual values from PLC
-    uint16_t* holdingRegistersWrite; // Desired values to write
-
-    // --- Communication buffers (shared for both reading and writing)
-    uint8_t* commRequestBuffer;  // Preallocated request buffer
-    uint8_t* commResponseBuffer; // Preallocated response buffer
-    int commRequestBufferSize;   // Maximum request size needed
-    int commResponseBufferSize;  // Maximum response size needed
-
-    // Global mutex to protect the TCP socket and communication buffers.
-    pthread_mutex_t socketMutex;
-
-    // Low-level communication functions using the shared buffers.
     bool sendRequest(uint8_t* request, int requestSize);
     bool receiveResponse(uint8_t* response, int expectedSize);
 
-    // Message building functions – they write into a provided buffer.
     void buildReadRequest(uint8_t* buffer, ModbusFunction functionCode, uint16_t startAddr, uint16_t quantity);
     void buildWriteSingleRequest(uint8_t* buffer, ModbusFunction functionCode, uint16_t address, uint16_t value);
     void buildWriteMultipleRequest(uint8_t* buffer, ModbusFunction functionCode, uint16_t address, uint16_t count, const void* values, uint8_t byteCount);
-
-    // Helper functions to compute maximum buffer sizes.
-    int computeMaxReadResponseSize() const;
-    int computeMaxWriteRequestSize() const;
 };
 
 #endif // MODBUS_TCP_CLIENT_H
